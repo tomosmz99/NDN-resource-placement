@@ -1,5 +1,7 @@
 from asyncio import subprocess
 import asyncio
+import json
+import time
 from typing import Optional
 import urllib.parse
 from ndn.encoding import Name, FormalName
@@ -74,6 +76,28 @@ async def send_interest(app: NDNApp, name: str) -> Optional[bytes]:
         name = Name.from_str(name)
         data_name, _meta_info, content = await app.express_interest(
             name, must_be_fresh=True, can_be_prefix=False, lifetime=10000)
+
+        return bytes(content) if content else None
+    except InterestNack as e:
+        print(f'!!!ERROR!!!: Nacked with reason={e.reason}')
+    except InterestTimeout:
+        print(f'!!!ERROR!!!: Timeout')
+    except InterestCanceled:
+        print(f'!!!ERROR!!!: Canceled')
+    except ValidationFailure:
+        print(f'!!!ERROR!!!: Data failed to validate')
+
+# ApplicationParameters(JSON)付きでInterestを送る
+async def send_interest_with_params(app: NDNApp, name: str, params: dict) -> Optional[bytes]:
+    try:
+        params_with_ts = {**params, "_ts": int(time.time() * 1000)}
+        name_obj = Name.from_str(name)
+        _, _meta_info, content = await app.express_interest(
+            name_obj,
+            app_param=json.dumps(params_with_ts).encode(),
+            must_be_fresh=False,
+            can_be_prefix=False,
+            lifetime=10000)
 
         return bytes(content) if content else None
     except InterestNack as e:

@@ -6,7 +6,7 @@ import json
 import asyncio
 from datetime import datetime
 
-from lib.ndn_utils import send_interest
+from lib.ndn_utils import send_interest, send_interest_with_params
 
 class Manager:
     def __init__(self):
@@ -107,21 +107,21 @@ class Manager:
         """プレフィックスに対してデータハンドラを登録して起動（同期版）"""
         # 1. 外部から呼び出される同期関数を登録
         @self.app.route(prefix)
-        def on_interest(name: FormalName, param: InterestParam, _app_param: Optional[BinaryStr]):
+        def on_interest(name: FormalName, param: InterestParam, app_param: Optional[BinaryStr]):
             str_name = Name.to_str(name)
             print(f'>> I: {str_name}')
             
             # 2. 非同期タスクとして処理をキックする
             # これにより、ライブラリ側は同期的な戻り値(None)を受け取り、警告が出ない
-            asyncio.create_task(self.async_process_interest(name, str_name))
+            asyncio.create_task(self.async_process_interest(name, str_name, app_param))
 
         print(f"Manager started on {prefix}")
         self.app.run_forever()
 
-    async def async_process_interest(self, name: FormalName, str_name: str):
+    async def async_process_interest(self, name: FormalName, str_name: str, app_param: Optional[BinaryStr] = None):
         try:
             # ここで本来の処理を呼ぶ
-            content = await self.on_interest(str_name)
+            content = await self.on_interest(str_name, app_param)
             
             # 結果の送信
             self.app.put_data(name, content=content.encode('utf-8'), freshness_period=1)
@@ -131,7 +131,7 @@ class Manager:
         except Exception as e:
             print(f"!! Error in async_process: {e}")
 
-    async def on_interest(self, name: str) -> str:
+    async def on_interest(self, name: str, app_param: Optional[BinaryStr] = None) -> str:
         """Interest名に基づき、Managerの各種操作にルーティング"""
         print(f"Processing: {name}")
         cleaned_name = name.removeprefix('/manager')
@@ -140,8 +140,41 @@ class Manager:
         if len(split_name) < 2:
             return "Error: Too few components."
         
-        operation = split_name[0]     # search, add, delete, create
+        operation = split_name[0]     # search, add, delete, create, register
         target_type = split_name[1]   # user, resource
+
+# --- .ndn関数の登録要求受付 ---
+        # 形式: /manager/register（ペイロードはNameではなくApplicationParametersのJSONに載せる）
+        if operation == 'register':
+            if not app_param:
+                return "Error: REGISTER requires ApplicationParameters"
+            try:
+                req = json.loads(bytes(app_param).decode('utf-8'))
+            except json.JSONDecodeError as e:
+                return f"Error: Invalid JSON in ApplicationParameters ({e})"
+
+            func_name = req.get("name")
+            content = req.get("content")
+            content_type = req.get("content_type", "ndn")
+
+            if not func_name or not content:
+                return "Error: 'name' and 'content' are required"
+
+            # TODO: node_db.jsonのスコアから配置先Seedを選ぶ(_select_seed_node)。今は仮で固定prefixに転送する
+            seed_prefix = "/seed"
+            forward_params = {"type": "CREATE", "name": func_name, "content": content, "content_type": content_type}
+            print(f"-> Redirecting Seed with Interest: {seed_prefix} (name={func_name})")
+            try:
+                seed_content = await send_interest_with_params(self.app, seed_prefix, forward_params)
+
+                if seed_content:
+                    seed_response = bytes(seed_content).decode('utf-8')
+                    return f"Manager_Proxy_Success: {seed_response}"
+                else:
+                    return "Manager_Proxy_Error: Seedから空のデータが返されました"
+
+            except Exception as e:
+                return f"Manager_Proxy_Error: Seedへの送信に失敗しました ({e})"
 
         # --- 子コンテナ作成要求の受付（頭脳に徹し、スパイへリダイレクト案内） ---
         # 形式: /manager/create/<worker_id>/<container_name>/[cpu_shares]/[mem_limit]
